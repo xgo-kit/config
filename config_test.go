@@ -2,7 +2,9 @@ package config
 
 import (
 	"github.com/stretchr/testify/assert"
+	"github.com/xgo-kit/config/reader"
 	"github.com/xgo-kit/config/source"
+	"sync"
 	"testing"
 )
 
@@ -15,6 +17,15 @@ paths:
 user: 
   name: a1
   password: "123"
+`
+
+	updatedData = `
+app: t2
+paths: 
+  - /var/log
+user: 
+  name: a2
+  password: "222"
 `
 )
 
@@ -38,6 +49,37 @@ func TestConfig(t *testing.T) {
 	assert.Equal(t, tc.User.Password, `123`)
 }
 
+func TestObserver(t *testing.T) {
+	ts := &testSource{data: []byte(testData), update: make(chan bool)}
+	c := NewConfig(WithSource(ts))
+	err := c.Load()
+	assert.NoError(t, err)
+
+	var username string
+	paths := make([]string, 0)
+
+	wg := sync.WaitGroup{}
+	wg.Add(2)
+	err = c.Observer(`user.name`, func(key string, value reader.Value) {
+		username, _ = value.String()
+		wg.Done()
+	})
+	assert.NoError(t, err)
+
+	err = c.Observer(`paths`, func(key string, value reader.Value) {
+		_ = value.Scan(&paths)
+		wg.Done()
+	})
+
+	// test observer
+	ts.data = []byte(updatedData)
+	ts.update <- true
+
+	wg.Wait()
+	assert.Equal(t, `a2`, username)
+	assert.Len(t, paths, 1)
+}
+
 type testConfig struct {
 	App   string
 	Paths []string
@@ -49,7 +91,7 @@ type testConfig struct {
 
 type testSource struct {
 	data   []byte
-	Update chan bool
+	update chan bool
 }
 
 func (ts *testSource) Load() ([]*source.KV, error) {
@@ -62,21 +104,19 @@ func (ts *testSource) Load() ([]*source.KV, error) {
 
 func (ts *testSource) Watch() (source.Watcher, error) {
 	return &testWatcher{
-		s:      ts,
-		update: make(chan bool),
-		close:  make(chan bool),
+		s:     ts,
+		close: make(chan bool),
 	}, nil
 }
 
 type testWatcher struct {
-	s      *testSource
-	update chan bool
-	close  chan bool
+	s     *testSource
+	close chan bool
 }
 
 func (w *testWatcher) Next() ([]*source.KV, error) {
 	select {
-	case _, ok := <-w.update:
+	case _, ok := <-w.s.update:
 		if !ok {
 			return nil, nil
 		}
